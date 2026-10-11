@@ -1,0 +1,1440 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Horse Evolution Derby — 100 ft</title>
+<script>
+/* ---------- crash sentinel ----------
+   Installed FIRST, before any other script. If anything on this page
+   throws — at load time or during the animation loop — the error is
+   painted as a bright red banner instead of leaving a silent, empty
+   navy screen. The "booting…" pill (see below the canvas) is removed
+   by the game itself once the first frame has actually painted, so a
+   stuck pill means "script never ran" and a red banner means "script
+   ran but crashed here is where". */
+(function () {
+  function showCrash(msg) {
+    try {
+      var b = document.getElementById('crashbanner');
+      if (!b) {
+        b = document.createElement('div');
+        b.id = 'crashbanner';
+        b.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:999;background:#dc2626;color:#fff;font:12px/1.5 monospace;padding:8px 12px;white-space:pre-wrap;max-height:40vh;overflow:auto';
+        (document.body || document.documentElement).appendChild(b);
+      }
+      b.textContent += msg + '\n';
+      var p = document.getElementById('bootpill'); if (p) p.parentNode.removeChild(p);
+    } catch (e) { /* never let the reporter itself crash */ }
+  }
+  window.addEventListener('error', function (e) { showCrash('ERROR: ' + e.message + '  @ line ' + e.lineno); });
+  window.addEventListener('unhandledrejection', function (e) { showCrash('PROMISE REJECTION: ' + e.reason); });
+  // the game calls this once its first animation frame has painted
+  window.__bootOK = function () {
+    var p = document.getElementById('bootpill'); if (p) p.parentNode.removeChild(p);
+    window.__bootOK = null;
+  };
+})();
+</script>
+<style>
+  /* ================================================================
+     GLOBAL SHELL
+     One full-window canvas (#game) renders the world. Every HUD
+     widget (top bar, records, minimap, roster, chart) is a separate
+     position:fixed ".panel" div floating above the canvas.
+     ================================================================ */
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{height:100%;overflow:hidden;font-family:ui-sans-serif,system-ui,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;background:#0b1220}
+  #game{position:fixed;inset:0;display:block}
+  /* Frosted dark-glass look shared by every HUD widget */
+  .panel{position:fixed;background:rgba(13,20,36,.84);backdrop-filter:blur(8px);border:1px solid rgba(148,163,184,.18);border-radius:14px;color:#e2e8f0;box-shadow:0 8px 30px rgba(0,0,0,.35);z-index:10}
+
+  /* ---------------- top control bar ---------------- */
+  #topbar{top:10px;left:10px;right:10px;height:52px;display:flex;align-items:center;gap:10px;padding:0 14px;flex-wrap:nowrap}
+  #title{font-weight:800;font-size:16px;white-space:nowrap}
+  #title small{opacity:.55;font-weight:600}
+  #geninfo{font-size:13px;color:#94a3b8;white-space:nowrap}
+  .spacer{flex:1}
+  .btn{background:#1e293b;border:1px solid rgba(148,163,184,.25);color:#e2e8f0;border-radius:9px;padding:7px 12px;font-size:13px;cursor:pointer;transition:background .15s,transform .05s;white-space:nowrap}
+  .btn:hover{background:#334155}
+  .btn:active{transform:scale(.96)}
+  /* segmented 1×–32× simulation-speed switch — click a step, or scroll ▲▼ over it */
+  .seg{display:flex;border:1px solid rgba(148,163,184,.25);border-radius:9px;overflow:hidden}
+  .seg button{background:#0f172a;border:none;color:#94a3b8;padding:7px 11px;font-size:13px;cursor:pointer;border-right:1px solid rgba(148,163,184,.15)}
+  .seg button:last-child{border-right:none}
+  .seg button.active{background:#f59e0b;color:#1e293b;font-weight:700}
+
+  /* ---------------- HUD widgets ---------------- */
+  /* all-time records strip (farthest distance / fastest finish) */
+  #records{top:72px;left:10px;font-size:12px;padding:7px 12px;color:#cbd5e1;max-width:min(520px,60vw)}
+  /* tiny 100 ft progress map, centered under the top bar */
+  #minimapBox{top:72px;left:50%;transform:translateX(-50%);padding:5px 8px}
+  #minimap{display:block}
+  /* live ranked roster of the current generation (top-right) */
+  #roster{top:128px;right:10px;width:288px;padding:10px;font-size:12px}
+  #roster h3{font-size:12px;margin-bottom:7px;color:#94a3b8;text-transform:uppercase;letter-spacing:.06em}
+  .rrow{display:flex;align-items:center;gap:6px;height:21px}
+  .rrow .rank{width:14px;color:#64748b;font-size:10px;text-align:right}
+  .rrow .chip{width:9px;height:9px;border-radius:3px;flex:none}
+  .rrow .nm{width:136px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:600}
+  .rrow .rbar{flex:1;height:6px;background:#1e293b;border-radius:3px;overflow:hidden}
+  .rrow .rbar>div{height:100%;border-radius:3px;width:0%}
+  .rrow .val{width:64px;text-align:right;color:#cbd5e1;font-size:11px;white-space:nowrap}
+
+  /* fitness-per-generation chart — now lives bottom-right, in the
+     spot where the old explanation panel used to be */
+  #chartbox{right:10px;bottom:10px;padding:8px}
+  #chart{display:block}
+
+  /* ---------------- end-of-generation results overlay ---------------- */
+  #overlay{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(2,6,16,.45);z-index:50}
+  #overlay.show{display:flex}
+  #ocard{background:rgba(13,20,36,.96);border:1px solid rgba(148,163,184,.22);border-radius:18px;padding:22px 28px;min-width:400px;max-width:560px;color:#e2e8f0;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+  #ocard .otitle{font-size:19px;font-weight:800;margin-bottom:8px}
+  #ocard .owin{font-size:14px;margin-bottom:12px;color:#cbd5e1}
+  #ocard table{width:100%;border-collapse:collapse;font-size:13px;margin-bottom:12px}
+  #ocard th{text-align:left;color:#64748b;font-weight:600;font-size:11px;padding:3px 6px;text-transform:uppercase;letter-spacing:.05em}
+  #ocard td{padding:4px 6px;border-top:1px solid rgba(148,163,184,.12)}
+  #ocard td.num{text-align:right;font-variant-numeric:tabular-nums}
+  #ocard .orec{color:#fbbf24;font-weight:700;font-size:13px;margin-bottom:10px}
+  #ocard .onext{color:#64748b;font-size:12px;margin-top:4px}
+  .obtn{margin-top:12px;background:#f59e0b;color:#1e293b;font-weight:700;border:none;border-radius:10px;padding:10px 18px;font-size:14px;cursor:pointer}
+  .obtn:hover{background:#fbbf24}
+</style>
+</head>
+<body>
+<!-- The entire simulation (sky, track, horses, particles) renders here -->
+<canvas id="game"></canvas>
+
+<!-- boot marker: removed by the game after its first painted frame.
+     If you can still read this, the game script never started. -->
+<div id="bootpill" style="position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:998;background:#1e293b;border:1px solid rgba(148,163,184,.3);color:#e2e8f0;font:600 14px ui-sans-serif,system-ui;padding:10px 18px;border-radius:12px">booting…</div>
+
+<!-- Pause / speed / camera / champion showcase / reset controls -->
+<div id="topbar" class="panel">
+  <div id="title">🐎 Horse Evolution Derby <small>· 100 ft</small></div>
+  <div id="geninfo">Gen 1 · 0.0s</div>
+  <div class="spacer"></div>
+  <button class="btn" id="bPause" title="Space">⏸ Pause</button>
+  <button class="btn" id="bResults" title="P — toggle the end-of-generation results card">📋 Results</button>
+  <div class="seg" id="speedSeg" title="Simulation speed — click a step, scroll ▲▼ over these buttons, or press keys 1–6">
+    <button data-s="1">1×</button><button data-s="2" class="active">2×</button><button data-s="4">4×</button><button data-s="8">8×</button><button data-s="16">16×</button><button data-s="32">32×</button>
+  </div>
+  <button class="btn" id="bView" title="V">👁 All</button>
+  <button class="btn" id="bShow">🏆 Champion</button>
+  <button class="btn" id="bReset">⟲ Reset</button>
+</div>
+
+<!-- All-time records strip -->
+<div id="records" class="panel">📜 no records yet — the chaos begins</div>
+<!-- Tiny 100 ft progress map -->
+<div id="minimapBox" class="panel"><canvas id="minimap" width="380" height="46"></canvas></div>
+
+<!-- Live ranked roster of the current generation -->
+<div id="roster" class="panel">
+  <h3>Starting Field</h3>
+  <div id="rlist"></div>
+</div>
+
+<!-- Fitness-per-generation chart (bottom-right) -->
+<div id="chartbox" class="panel"><canvas id="chart" width="300" height="132"></canvas></div>
+
+<!-- End-of-generation results modal -->
+<div id="overlay"><div id="ocard"></div></div>
+
+<script>
+"use strict";
+/* ════════════════════════════════════════════════════════════════════
+   HORSE EVOLUTION DERBY — an evolution simulation you can watch
+   ════════════════════════════════════════════════════════════════════
+
+   THE PITCH
+   Twelve ragdoll horses race 100 feet across a pasture. Each horse is
+   a soft body built from NODES (point masses) and SEGMENTS (distance
+   constraints) — like a marionette made of springs. Ten of those
+   segments are MUSCLES whose rest length is continuously squeezed or
+   stretched by a tiny neural network: the horse's brain. Nobody
+   designs a gait. Every wriggle, hop and gallop you see was
+   discovered by evolution alone.
+
+   GENERATION 1 IS FED NO INFORMATION
+   Every brain starts as pure random weights. No horse is told what
+   legs, gravity, the ground or a finish line are — it only feels a
+   few body signals and twitches at random. Most of gen 1 slides
+   backward and scores negative fitness. That failure is the point.
+   The one mercy is cosmetic: a starting gate spawns every horse
+   STANDING on all fours and holds that pose for a blink before the
+   brains take over — nobody scores anything during the hold.
+
+   THE RULES: FORWARD GOOD, BACKWARD BAD, HORSE-LIKE BEST
+   Fitness is the sole feedback evolution gets, and it never says HOW
+   to move:
+       + forward distance travelled by the center of mass
+       − 3 × backward distance slipped
+       + a big bonus for crossing the 100 ft line (+ speed bonus)
+       + GAIT LADDER bonuses (exact rates in the constants, logic in
+         stepHorse) — an escalating reward for looking like a horse:
+           all four "arms" (knees) grounded   → slight reward
+           all four hooves grounded           → heavy reward
+           standing on all fours, spine up    → extremely great reward
+           front pair stepping forward        → paid per FOOT, same
+                                                rate as walking — front
+                                                legs are FIRST priority
+           rear pair only, front legs abandoned → PUNISHED (no butt-in-
+                                                  the-air wheelbarrowing)
+           WALKING OUT (front+rear hooves grounded + genuinely
+                        stepping forward)  → paid per FOOT travelled ON
+                        TOP of posture pay — travel beats statue
+           galloping (all four legs cycling + flight phase + fast)
+                                              → more than anything else
+   Two bookend rules frame every race:
+       STANDING START — horses are built on all fours (straight legs,
+       hooves planted, spine up) and the starting gate holds that pose
+       for SETTLE_T seconds before any brain may twitch anything
+       FLOOR RULE — a horse sprawled below FLOOR_H spine height for
+       over FLOOR_T continuous seconds is judged stuck: its run ends
+       right there (🛌 in the roster), fitness frozen as-is
+   Crawling, hopping, rolling, face-first flopping — all legal. But
+   horses that hold a horse-like posture — and above all horses that
+   GALLOP — now earn far more than belly-floppers do.
+
+   THE EVOLUTION LOOP (every ~30 simulated seconds)
+     1. rank all 12 horses by the fitness they earned
+     2. copy the top 2 brains unchanged            (elitism)
+     3. inject 2 brand-new random brains           (fresh blood)
+     4. fill the remaining 8 slots by picking parents through
+        3-way tournaments → uniform crossover → gaussian mutation
+     5. rebuild the bodies, rerun the race, repeat forever
+   (The results card between generations can be toggled off with P or
+   the 📋 button — races then flow straight into each other.)
+   Random twitching → shuffling → walking out → something that
+   genuinely resembles galloping.
+
+   HOW THE CODE IS ORGANIZED (read top to bottom)
+     utils / constants    tiny math helpers + every tuning knob
+     names                syllable-glue name generator ("LorPox")
+     genome               random brains, crossover, mutation
+     physics primitives   Verlet nodes, bones, muscles, the solver
+     horse builder        anatomy assembly (ASCII diagram in there)
+     brain                23→14→10 network, one pass per substep
+     simulation           integrate → constrain → collide → score
+     genetic algorithm    selection, crossover, mutation
+     rendering            camera, scenery, horses, floating name tags
+     HUD                  roster, minimap, records, fitness chart
+     game state           generation flow + champion showcase
+   ════════════════════════════════════════════════════════════════════ */
+
+/* ---------- utils ----------
+   Tiny math helpers used everywhere. */
+const TAU = Math.PI * 2;        // 2π — a full circle in radians
+// rand() → 0..1 · rand(5) → 0..5 · rand(2,7) → 2..7
+const rand = (a = 1, b) => b === undefined ? Math.random() * a : a + Math.random() * (b - a);
+// randn() → one sample from the standard normal distribution
+// (Box–Muller transform: turn two uniform samples into a bell curve)
+const randn = () => { let u = 0, v = 0; while (!u) u = Math.random(); while (!v) v = Math.random(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(TAU * v); };
+const clamp = (v, a, b) => v < a ? a : (v > b ? b : v);   // keep v inside [a,b]
+const lerp = (a, b, t) => a + (b - a) * t;                // linear blend a→b by factor t (0..1)
+
+/* ---------- constants ----------
+   Every tuning knob of the simulation lives here. */
+const FT = 62;            // pixels per foot — the whole world is measured in FEET
+const TRACK = 100;        // race length in feet — first center of mass past this wins
+const GRAV = 24;          // gravity in ft/s² (exaggerated from 9.8 for snappier motion)
+const DT = 1 / 120;       // physics substep: 120 steps of physics per simulated second
+const ITERS = 10;         // constraint-relaxation sweeps per substep (more = stiffer bodies)
+const DAMP = 0.999;       // fraction of velocity kept per substep (1 = no air drag)
+const POP = 12;           // horses per generation
+const GEN_TIME = 30;      // simulated seconds per generation (long runway for a 100 ft race)
+const STAG_T = 6;         // seconds without forward progress before a horse "gives up"
+const NI = 23, NH = 14, NO = 10;   // neural-net shape: 23 inputs → 14 hidden → 10 muscles
+// --- GAIT REWARD LADDER — fitness per SECOND, paid inside stepHorse ---
+// An escalating curriculum for horse-like posture and locomotion:
+const ARMS_R    = 0.6;    // all four knees ("arms") grounded → slight reward
+const HOOVES_R  = 3;      // all four hooves grounded, body slumped low → heavy reward
+const STAND_R   = 9;      // standing on all fours, spine held up → extremely great reward
+const GALLOP_R  = 36;     // galloping (all hooves airborne + fast) → more than anything
+const STAND_H   = 0.60;   // mean spine height (ft) separating "standing" from "slumped"
+const GALLOP_VX = 1.5;    // min forward speed (ft/s) while airborne to count as galloping
+const FINISH_BONUS = 50;  // one-time bonus for crossing the 100 ft line
+// --- FRONT-LEG PRIORITY (horses were wheelbarrowing on their back
+// legs with the butt in the air — this taxes that and pays for front
+// legs instead). The rear tax fires whenever weight rests on the rear
+// hooves with BOTH front hooves up — so tapping a front hoof down once
+// a second no longer launders chronic rear-only driving. ---
+const FRONT_R  = 5;       // fitness per FOOT travelled with a front hoof bearing weight — first priority
+const REAR_PEN = -4;      // per second: rear hooves loaded while both front hooves are up
+const PAIR_MEM = 1.2;     // seconds a hoof pair stays "recently used"; gallop must cycle all 4 legs
+// --- WALK BONUS — "help the horses learn to walk out" ---
+// Every bonus below is paid PER FOOT OF REAL TRAVEL, never per second,
+// so nothing can be farmed by standing still or rocking in place:
+//   front hooves grounded + moving  → FRONT_R per foot (first priority)
+//   BOTH pairs grounded + moving    → WALK_R per foot MORE (true walk)
+//   rear hooves only, fronts up     → REAR_PEN per second (still taxed)
+// Faster walkers earn more per second automatically (more feet/s),
+// in-place jitter nets ~zero (backward slip is punished 3:1), and
+// walking needs BOTH a front and a rear hoof down: wheelbarrows and
+// face-plants cannot collect the full rate.
+const WALK_R  = 5;        // fitness per FOOT travelled with both hoof pairs stepping
+const WALK_VX = 0.4;      // min sustained forward speed (ft/s) for "stepping" to count as walking
+// --- STANDING START & FLOOR RULE ---
+// Every horse is BUILT in an all-fours standing pose: straight-ish legs,
+// hooves resting on the turf, spine ~0.9 ft up. For SETTLE_T seconds the
+// starting gate locks every muscle at those built lengths so each run
+// literally begins standing up — then the brain takes over and the
+// fitness clock starts (nothing is scored during the hold).
+// On the other end, a horse that flops and stays flopped is a waste of
+// track time: while its mean spine height stays under FLOOR_H (anything
+// genuinely standing holds more than 0.60) a timer runs, and FLOOR_T
+// continuous seconds on the floor ends that horse's run on the spot.
+const SETTLE_T = 0.6;    // seconds the starting gate holds the standing spawn pose
+const FLOOR_H  = 0.45;   // mean spine height below this = lying on the floor
+const FLOOR_T  = 10;     // seconds allowed on the floor before the run is ended
+// ?autotest=1 URL flag: run fast with tiny generation pauses (used for automated QA)
+const AUTOTEST = new URLSearchParams(location.search).has('autotest');
+const INTER_TIME = AUTOTEST ? 0.6 : 2.4;   // real-time pause between generations (seconds)
+
+/* ---------- name generator ----------
+   Each horse's name is TWO syllables glued together out of this list,
+   e.g. "LorPox", "KaxFem", "YumNap". usedNames keeps every name
+   unique across the whole run so records and lineages stay readable;
+   with 21 syllables there are 441 combos — and if a very long run
+   ever exhausts them, duplicates are simply allowed again. */
+const SYL = ["Lor","Pox","Top","Map","Lan","Kax","Chi","Ret","Rep","Oip","Mam","Nat","Nap","Foz","Fem","Yux","Yor","Yum","Lum","Lim","Poe"];
+const usedNames = new Set();
+// glue two random syllables together
+const glue = () => SYL[(Math.random() * SYL.length) | 0] + SYL[(Math.random() * SYL.length) | 0];
+function randName() {
+  // try up to 40 times to find an unused combination, then give up politely
+  for (let t = 0; t < 40; t++) { const n = glue(); if (!usedNames.has(n)) { usedNames.add(n); return n; } }
+  return glue();
+}
+
+/* ---------- genome (the brain) ----------
+   A genome is just four flat Float32Arrays: the weights and biases of
+   a 21→14→10 feed-forward neural net. That is the ENTIRE inherited
+   package — bodies are rebuilt identical each generation, only brains
+   evolve. No horse is ever TOLD how to move; generation 1 is pure
+   random noise and every usable gait afterwards is discovered purely
+   by selection acting on fitness. */
+function randomGenome() {
+  const g = { w1: new Float32Array(NI * NH), b1: new Float32Array(NH), w2: new Float32Array(NH * NO), b2: new Float32Array(NO) };
+  // weights scaled ~0.55 and biases ~0.30 → small random twitches at
+  // boot (big weights would make gen 1 spasm violently instead of
+  // twitching, which is less fun to watch and harder to select from)
+  for (let i = 0; i < g.w1.length; i++) g.w1[i] = randn() * 0.55;
+  for (let i = 0; i < g.b1.length; i++) g.b1[i] = randn() * 0.30;
+  for (let i = 0; i < g.w2.length; i++) g.w2[i] = randn() * 0.55;
+  for (let i = 0; i < g.b2.length; i++) g.b2[i] = randn() * 0.30;
+  return g;
+}
+// deep copy — used by elitism and for the all-time champion snapshot
+const cloneG = g => ({ w1: g.w1.slice(), b1: g.b1.slice(), w2: g.w2.slice(), b2: g.b2.slice() });
+// uniform crossover: build a child gene slot by slot, 50/50 per slot
+// from parent A or parent B
+function crossover(a, b) {
+  const c = { w1: a.w1.slice(), b1: a.b1.slice(), w2: a.w2.slice(), b2: a.b2.slice() };
+  for (const k of ["w1", "b1", "w2", "b2"]) { const A = c[k], B = b[k]; for (let i = 0; i < A.length; i++) if (Math.random() < 0.5) A[i] = B[i]; }
+  return c;
+}
+// gaussian mutation: each gene has a 9% chance of being nudged by a
+// bell-curve random step (σ = 0.32), clamped so no weight can explode
+function mutate(g, rate = 0.09, sig = 0.32) {
+  for (const k of ["w1", "b1", "w2", "b2"]) { const A = g[k]; for (let i = 0; i < A.length; i++) if (Math.random() < rate) A[i] = clamp(A[i] + randn() * sig, -4, 4); }
+  return g;
+}
+
+/* ---------- physics primitives (Verlet integration) ----------
+   A NODE is a point mass. Verlet integration stores its PREVIOUS
+   position instead of its velocity — velocity is implied by
+   (current − previous). This makes constraints (segments) trivially
+   stable: after moving everything, we simply pull connected nodes
+   back toward their rest distance a few times per substep.
+     x,y    current position in feet (y is UP, the ground is at y = 0)
+     px,py  previous position (where the node was one substep ago)
+     r      radius — also used as the ground-contact skin
+     m,im   mass and inverse mass (the solver pulls light nodes more)
+     fr     ground friction 0..1 (0 = ice, 1 = rubber); hooves ~0.85
+     gnd    "touched the ground this substep" flag
+     cm     counts toward center-of-mass & scoring (the tail doesn't) */
+function makeNode(x, y, r, m, fr, cm = true) {
+  return { x, y, px: x, py: y, r, m, im: 1 / m, fr, gnd: false, cm };
+}
+// a BONE: a rigid segment that always tries to keep its rest length
+function link(a, b, stiff) {
+  return { a, b, stiff, rest: Math.hypot(b.x - a.x, b.y - a.y) };
+}
+// a MUSCLE: a segment whose rest length the brain can drive anywhere
+// between rest×minF (fully contracted) and rest×maxF (fully extended)
+function mkMuscle(a, b, minF, maxF, stiff) {
+  const rest = Math.hypot(b.x - a.x, b.y - a.y);
+  return { a, b, stiff, rest, min: rest * minF, max: rest * maxF };
+}
+// one constraint solve: move both ends toward the rest length,
+// weighted by inverse mass so heavy nodes move less than light ones.
+// stiff scales the correction (1 = snap fully this sweep, 0.5 = half).
+function relax(l) {
+  const a = l.a, b = l.b;
+  const dx = b.x - a.x, dy = b.y - a.y;
+  let d = Math.sqrt(dx * dx + dy * dy); if (d < 1e-9) d = 1e-9;   // guard against divide-by-zero
+  const w = a.im + b.im; if (w <= 0) return;                       // two immovable nodes → nothing to do
+  const f = (d - l.rest) / d * l.stiff;                            // signed correction factor
+  const fx = dx * f, fy = dy * f;
+  a.x += fx * (a.im / w); a.y += fy * (a.im / w);                  // pull a toward b
+  b.x -= fx * (b.im / w); b.y -= fy * (b.im / w);                  // pull b toward a
+}
+
+/* ---------- horse builder ----------
+   ANATOMY (world units: x → right, y → UP, ground at y = 0)
+
+     T3──T2──T1                       ← tail (3 nodes, cosmetic only —
+              \                          excluded from scoring)
+               R ═════ M ═════ S ── NB ── H
+               │               │           \
+              / \             / \            ← head
+             k    k          k    k
+             │    │          │    │
+             f    f          f    f          ← hooves (high friction)
+
+   R rump · M mid-spine · S shoulder · NB neck-base · H head
+   Every line is a BONE (rigid distance constraint). Legs are TWO
+   segments each (hip→knee→hoof): the front pair hangs from the
+   shoulder S, the rear pair from the rump R. For the gait rewards the
+   four KNEE nodes double as the horse's "arms" — all four down means
+   the horse is sprawled flat on its belly (see stepHorse).
+
+   The 10 MUSCLES (marked ═ above) are segments whose rest length the
+   brain can shorten/lengthen, in this fixed order:
+     [0] back arch (R→S)   gallop flex of the whole spine
+     [1] neck bob  (S→H)
+     [2] FL swing (NB→FL knee)   [3] FL fold (S→FL hoof)
+     [4] FR swing                [5] FR fold
+     [6] RL swing (S→RL knee)    [7] RL fold (R→RL hoof)
+     [8] RR swing                [9] RR fold
+   "swing" pulls a whole leg forward/backward, "fold" curls a knee up.
+   Real galloping = firing these in the right rhythm — a rhythm the
+   brain has to DISCOVER, because it is never taught one.
+
+   SPAWN POSE: the coordinates above ARE an all-fours standing pose —
+   spine ≈ 0.9 ft up, knees half-cocked, hooves resting on the turf —
+   and the starting gate (SETTLE_T, enforced in stepHorse) locks every
+   muscle at these built lengths so each run literally begins on all
+   fours, standing up. */
+function addLeg(nodes, bones, muscles, hip, S, NB, R, isFront) {
+  // knee node (light, low friction) and hoof node (heavy-ish, very
+  // high friction so it can grip the turf instead of sliding)
+  const k = makeNode(hip.x + (isFront ? 0.03 : -0.02), 0.48, 0.06, 0.55, 0.08);
+  const f = makeNode(hip.x + (isFront ? -0.04 : 0.05), 0.075, 0.075, 0.40, 0.85);
+  nodes.push(k, f);
+  bones.push(link(hip, k, 1), link(k, f, 1));   // hip→knee, knee→hoof (rigid)
+  if (isFront) {
+    muscles.push(mkMuscle(NB, k, 0.78, 1.24, 0.6));  // swing whole leg forward
+    muscles.push(mkMuscle(S, f, 0.66, 1.06, 0.6));   // fold knee up
+  } else {
+    muscles.push(mkMuscle(S, k, 0.84, 1.14, 0.6));   // swing hind leg forward
+    muscles.push(mkMuscle(R, f, 0.66, 1.06, 0.6));   // fold knee up
+  }
+  return { hip, k, f };
+}
+// Assemble one complete horse from a genome. hue → coat color, number
+// → bib number, name → the glued-syllable name shown on its name tag.
+function buildHorse(genome, hue, number, name) {
+  const nodes = [], bones = [], muscles = [];
+  // spine + head: rump, mid, shoulder, neck-base, head (x, y, radius, mass, friction)
+  const R  = makeNode(0.00, 0.88, 0.20, 3.2, 0.10);
+  const M  = makeNode(0.54, 0.92, 0.20, 3.2, 0.10);
+  const S  = makeNode(1.08, 0.90, 0.20, 3.2, 0.10);
+  const NB = makeNode(1.38, 1.06, 0.12, 1.3, 0.10);
+  const H  = makeNode(1.74, 1.30, 0.13, 1.0, 0.12);
+  nodes.push(R, M, S, NB, H);
+  // rigid skeleton; the diagonal M→NB brace keeps the neck from folding flat
+  bones.push(link(R, M, 1), link(M, S, 1), link(S, NB, 1), link(NB, H, 1), link(M, NB, 0.9));
+  muscles.push(mkMuscle(R, S, 0.84, 1.04, 0.6));   // back arch (gallop flex)
+  muscles.push(mkMuscle(S, H, 0.75, 1.02, 0.5));   // neck bob
+  // four legs: FL & FR hang from the shoulder, RL & RR from the rump
+  const legs = [];
+  legs.push(addLeg(nodes, bones, muscles, S, S, NB, R, true));   // FL (near front)
+  legs.push(addLeg(nodes, bones, muscles, S, S, NB, R, true));   // FR (far front)
+  legs.push(addLeg(nodes, bones, muscles, R, S, NB, R, false));  // RL (near rear)
+  legs.push(addLeg(nodes, bones, muscles, R, S, NB, R, false));  // RR (far rear)
+  // cosmetic tail — cheap physics, no mass in scoring, just flourish
+  const T1 = makeNode(-0.28, 0.94, 0.045, 0.25, 0.05, false);
+  const T2 = makeNode(-0.52, 0.98, 0.045, 0.22, 0.05, false);
+  const T3 = makeNode(-0.72, 1.04, 0.045, 0.20, 0.05, false);
+  nodes.push(T1, T2, T3);
+  bones.push(link(R, T1, 0.5), link(T1, T2, 0.5), link(T2, T3, 0.5));
+
+  // the horse object: body parts, brain handles, and all racing state
+  const h = {
+    nodes, bones, muscles, legs, genome, number, name,
+    R, M, S, NB, H, T1, T2, T3,
+    color: `hsl(${hue} 72% 56%)`, mid: `hsl(${hue} 62% 44%)`, dark: `hsl(${hue} 55% 28%)`,
+    inputs: new Float32Array(NI), hid: new Float32Array(NH), out: new Float32Array(NO).fill(0.5),
+    com: { x: 0, y: 0 }, fitness: 0, dist: 0, maxDist: 0, lastImprove: 0,
+    finished: false, finishTime: 0, stagnant: false, dead: false, done: false,
+    stuck: false, floorT: 0,    // floor-stuck watch: continuous seconds sprawled
+    vxS: 0, vyS: 0, prevY: 0, touchF: false, touchR: false,
+    touchAF: false, touchAR: false, gait: "",  // gait: gallop|walk|stand|hooves|arms|front|rear
+    frontT: 0, rearT: 0                        // last time each hoof pair bore weight
+  };
+  // starting center of mass = mass-weighted average of scoreable nodes
+  let cx = 0, cy = 0, mm = 0;
+  for (const n of nodes) { if (!n.cm) continue; cx += n.x * n.m; cy += n.y * n.m; mm += n.m; }
+  h.com.x = cx / mm; h.com.y = cy / mm;
+  h.prevX = h.com.x; h.prevY = h.com.y; h.start = h.com.x;
+  return h;
+}
+
+/* ---------- brain ----------
+   One feed-forward pass per physics substep (120× per simulated
+   second). The net is small so evolution can move fast.
+   INPUTS (23) — everything a horse can "feel":
+     0–1    SLOW CPG at 1.7 Hz — a walk-tempo clock. A horse this size
+            steps at 1–2 strides per second, so the net gets a rhythm
+            that matches real leg swing and can lock a WALK onto it.
+     2–4    faster CPGs (5.6 Hz sin/cos + a 13.8 Hz flutter) for
+            trot/gallop tempos. These built-in clock signals make
+            evolving periodic motion from scratch dramatically easier
+            — without them, no gait rhythm is ever discovered.
+     5–6    smoothed body velocity (forward & vertical)
+     7      body tilt (angle of the spine)
+     8–17   proprioception: each muscle's current contraction mapped
+            from 0..1 to −1..1 (the net can feel its own limbs)
+     18–19  hoof contact: is the front / rear pair on the ground
+     20–21  arm contact: is the front / rear knee ("arm") pair down
+     22     spine height: −1 = belly on the ground, +1 = standing tall
+   HIDDEN (14): tanh — squashes into −1..1, biologically & numerically
+   friendly. OUTPUTS (10): sigmoid 0..1, one per muscle, where 0 =
+   fully contracted and 1 = fully extended. */
+function think(h, t) {
+  const p = h.inputs; let i = 0;
+  // central pattern generators: built-in rhythms the net can lock a
+  // gait onto. The slow 1.7 Hz pair paces a walk stride; the faster
+  // ones pace trot/gallop twitches.
+  p[i++] = Math.sin(t * 1.7); p[i++] = Math.cos(t * 1.7);
+  p[i++] = Math.sin(t * 5.6); p[i++] = Math.cos(t * 5.6); p[i++] = Math.sin(t * 13.8);
+  // body velocity (smoothed)
+  p[i++] = clamp(h.vxS / 7, -1, 1); p[i++] = clamp(h.vyS / 7, -1, 1);
+  // body tilt
+  p[i++] = Math.atan2(h.S.y - h.R.y, h.S.x - h.R.x) * 0.8;
+  // proprioception: every muscle's current contraction
+  for (const mu of h.muscles) p[i++] = ((mu.rest - mu.min) / (mu.max - mu.min)) * 2 - 1;
+  // hoof contact
+  p[i++] = h.touchF ? 1 : -1; p[i++] = h.touchR ? 1 : -1;
+  // arm (knee) contact + how high the spine is held — the net can feel
+  // the exact postures the gait reward ladder pays for
+  p[i++] = h.touchAF ? 1 : -1; p[i++] = h.touchAR ? 1 : -1;
+  p[i++] = clamp(((h.R.y + h.M.y + h.S.y) / 3 - 0.45) / 0.5, -1, 1);
+  const { w1, b1, w2, b2 } = h.genome;
+  // hidden layer: weighted sum + bias, squashed by tanh
+  for (let j = 0; j < NH; j++) {
+    let s = b1[j]; const off = j * NI;
+    for (let k = 0; k < NI; k++) s += w1[off + k] * p[k];
+    h.hid[j] = Math.tanh(s);
+  }
+  // output layer: sigmoid → muscle contraction 0..1
+  for (let j = 0; j < NO; j++) {
+    let s = b2[j]; const off = j * NH;
+    for (let k = 0; k < NH; k++) s += w2[off + k] * h.hid[k];
+    h.out[j] = 1 / (1 + Math.exp(-s));   // sigmoid -> muscle 0..1
+  }
+}
+
+/* ---------- simulation ---------- */
+// all-time records, updated live as the race runs
+let recDist = { d: 0, name: "", gen: 0 };
+let recTime = { t: 1e9, name: "", gen: 0 };
+let gen = 1;
+
+// celebration when a horse's center of mass crosses the 100 ft line:
+// update the fastest-finish record and spray confetti around it
+function onHorseFinish(h, w) {
+  if (h.finishTime < recTime.t) recTime = { t: h.finishTime, name: h.name, gen };
+  for (let i = 0; i < 70; i++) {
+    w.confetti.push({
+      x: h.com.x + rand(-0.6, 0.6), y: h.com.y + rand(0.2, 1.2),
+      vx: rand(-3.5, 3.5), vy: rand(2, 7.5),
+      col: `hsl(${rand(360)} 90% 60%)`, life: rand(0.9, 1.8), rot: rand(TAU)
+    });
+  }
+}
+
+/* One physics substep for one horse (120 per simulated second).
+   Order matters: think → muscles chase targets → integrate →
+   satisfy constraints & collide → friction → score. */
+function stepHorse(h, t, w) {
+  if (h.dead) return;               // NaN explosion → this horse is out
+  /* STARTING GATE — for the first SETTLE_T seconds of a run the
+     muscles stay locked at their BUILT lengths, which is the all-fours
+     standing pose the builder assembled: straight legs, hooves on the
+     turf, spine up. Every race therefore opens with the field standing
+     on all fours; the brain gets control (and the fitness clock
+     starts) the moment the gate opens. Physics still runs during the
+     hold, so each horse settles onto its hooves under gravity. */
+  const settling = t < SETTLE_T;
+  think(h, t);
+  // muscles chase the brain's target rest length smoothly (0.2 per
+  // substep ≈ organic contraction speed rather than teleporting) —
+  // paused during the gate hold, which would crumple the spawn pose
+  if (!settling) {
+    for (let i = 0; i < NO; i++) {
+      const mu = h.muscles[i];
+      const tgt = mu.min + (mu.max - mu.min) * h.out[i];
+      mu.rest += (tgt - mu.rest) * 0.2;
+    }
+  }
+  // verlet integration (y is UP in world space): "gravity" is a small
+  // constant downward nudge applied to the NEW position each substep
+  for (const n of h.nodes) {
+    const vx = (n.x - n.px) * DAMP, vy = (n.y - n.py) * DAMP;
+    n.px = n.x; n.py = n.y;
+    n.x += vx; n.y += vy - GRAV * DT * DT;
+    if (!isFinite(n.x) || !isFinite(n.y)) { h.dead = true; return; }  // physics blew up
+  }
+  // constraint relaxation + ground clamping: repeat a few sweeps so
+  // stiff bones re-assert themselves against gravity & muscles
+  let tF = false, tR = false;
+  const hoofDown = [false, false, false, false];   // per-leg hoof contact this substep
+  const armDown  = [false, false, false, false];   // per-leg knee ("arm") contact
+  for (let it = 0; it < ITERS; it++) {
+    for (const l of h.bones) relax(l);
+    for (const mu of h.muscles) relax(mu);
+    for (const n of h.nodes) {
+      if (n.y < n.r) {                 // node sank below the ground plane
+        n.y = n.r; n.gnd = true;       // clamp on top + remember contact
+        // log WHICH part touched: hooves 0–3 (FL FR RL RR) and knees —
+        // the gait ladder below needs exact counts, not just "a hoof"
+        if (n === h.legs[0].f)      { hoofDown[0] = true; tF = true; }
+        else if (n === h.legs[1].f) { hoofDown[1] = true; tF = true; }
+        else if (n === h.legs[2].f) { hoofDown[2] = true; tR = true; }
+        else if (n === h.legs[3].f) { hoofDown[3] = true; tR = true; }
+        else if (n === h.legs[0].k) armDown[0] = true;
+        else if (n === h.legs[1].k) armDown[1] = true;
+        else if (n === h.legs[2].k) armDown[2] = true;
+        else if (n === h.legs[3].k) armDown[3] = true;
+      }
+    }
+  }
+  // ground friction & vertical damping applied once per substep:
+  // scraping the previous position toward the current one kills the
+  // tangential part of the velocity — that IS friction in Verlet
+  for (const n of h.nodes) {
+    if (!n.gnd) continue;
+    n.gnd = false;
+    const vx = n.x - n.px;
+    n.px = n.x - vx * (1 - n.fr);      // keep (1−fr) of the slide, eat fr of it
+    n.py = n.y;                        // no vertical bounce stored
+    // fast, grippy hooves kick up dust particles
+    if (n.fr > 0.5 && Math.abs(vx) > 2.2 && w.dust.length < 160 && Math.random() < 0.3) {
+      w.dust.push({ x: n.x, y: n.r, vx: vx * 0.35 + rand(-0.3, 0.3), vy: rand(0.4, 1.3), life: 1, s: rand(0.04, 0.09) });
+    }
+  }
+  h.touchF = tF; h.touchR = tR;
+  h.touchAF = armDown[0] || armDown[1]; h.touchAR = armDown[2] || armDown[3];
+  if (tF) h.frontT = t; if (tR) h.rearT = t;   // remember when each pair last bore weight
+
+  // center of mass + scoring
+  let cx = 0, cy = 0, mm = 0;
+  for (const n of h.nodes) { if (!n.cm) continue; cx += n.x * n.m; cy += n.y * n.m; mm += n.m; }
+  cx /= mm; cy /= mm;
+  const dx = cx - h.com.x, dy = cy - h.com.y;
+  h.com.x = cx; h.com.y = cy;
+  h.vxS = lerp(h.vxS, dx / DT, 0.06); h.vyS = lerp(h.vyS, dy / DT, 0.06);   // smoothed velocity for the brain
+
+  // finished horses stop scoring (body keeps settling); nothing scores
+  // during the gate hold either — the standing spawn pays nobody
+  if (h.done || settling) return;
+
+  /* GAIT LADDER — posture bonuses paid on top of displacement. States
+     are checked top-down and are mutually exclusive: exactly one (or
+     none) matches on any substep. Rates are per SECOND (× DT).
+       💨 gallop  every hoof airborne + real forward speed + BOTH hoof
+                  pairs touched down within the last PAIR_MEM seconds —
+                  a REAL gallop cycles all four legs, so legs-tucked
+                  hopping on one pair no longer wins the top prize.
+                  Scaled by speed. The single richest reward.
+       🐾 stand   all four hooves down AND the spine held up — "standing
+                  on all fours". Extremely great reward.
+       🐎 hooves  all four hooves down but the body slumped low — heavy
+                  reward, less than a tall stance.
+       🛋 arms    all four knees ("arms") grounded = sprawled flat on
+                  the belly. Slight reward, deliberately small.
+       ⭐ front   front pair bearing weight while stepping forward →
+                  paid PER FOOT (stacking bonus below) — front legs are
+                  FIRST priority and front-leg scooting is real money.
+                  A stationary front lean earns nothing.
+       ❌ rear    rear hooves carrying weight while NEITHER front hoof
+                  touches — the "butt in the air" wheelbarrow exploit
+                  is taxed hard every substep it happens, and front-leg
+                  taps can no longer launder it: what matters is that
+                  the front hooves are DOWN, not when they last were.
+                  (A real gallop's rear push-off costs a fraction of a
+                  percent of its reward — effectively noise.)
+       🚶 walk    front AND rear hooves grounded + genuinely stepping
+                  forward (vxS > WALK_VX, body not sprawled) → WALK_R
+                  per FOOT ON TOP of the front stepping pay — a true
+                  walk earns double per foot. Standing still banks the
+                  poorest posture pay; travelling feet out-earn it. */
+  const allHooves = hoofDown[0] && hoofDown[1] && hoofDown[2] && hoofDown[3];
+  const allArms   = armDown[0] && armDown[1] && armDown[2] && armDown[3];
+  const spineY    = (h.R.y + h.M.y + h.S.y) / 3;      // how high the body is held
+  const standing  = allHooves && spineY > STAND_H;    // tall stance on all fours
+  const frontPair = hoofDown[0] || hoofDown[1];       // either front hoof bearing weight
+  const rearPair  = hoofDown[2] || hoofDown[3];       // either rear hoof bearing weight
+  const freshFront = t - h.frontT < PAIR_MEM;         // front pair used recently?
+  const freshRear  = t - h.rearT  < PAIR_MEM;         // rear pair used recently?
+  const galloping = !frontPair && !rearPair && h.vxS > GALLOP_VX && freshFront && freshRear;
+  h.gait = galloping ? "gallop" : standing ? "stand" : allHooves ? "hooves" : allArms ? "arms"
+         : frontPair ? "front"                        // front legs engaged — priority!
+         : rearPair ? "rear" : "";                    // rear-only driving — taxed
+  if (galloping) { h.lastGallop = t; h.fitness += GALLOP_R * clamp(h.vxS / 4, 0.75, 2.5) * DT; }
+  else if (standing)  h.fitness += STAND_R  * DT;
+  else if (allHooves) h.fitness += HOOVES_R * DT;
+  else if (allArms)   h.fitness += ARMS_R   * DT;
+  else if (h.gait === "rear")  h.fitness += REAR_PEN * DT;   // wheelbarrow exploit tax
+
+  // STEPPING PAY — the "learn to walk out" engine, anchored to actual
+  // displacement so nothing can be farmed in place:
+  //   front hooves down + travelling → FRONT_R per foot (front legs are
+  //   first priority — face-plant scooting IS real locomotion and earns
+  //   real money, a stationary lean earns nothing), then
+  //   BOTH ends down + travelling → WALK_R per foot MORE on top, so a
+  //   true walk out-earns any one-ended gait at the same speed. Rear-
+  //   only poses collect neither bonus and still eat the rear tax.
+  if (frontPair && h.vxS > WALK_VX && dx > 0) h.fitness += FRONT_R * dx;
+  const stepping = frontPair && rearPair && !allArms && h.vxS > WALK_VX;
+  if (stepping && dx > 0) {
+    h.fitness += WALK_R * dx;
+    h.gait = "walk";
+  }
+
+  /* REWARD FORWARD, PUNISH BACKWARD — the original core rule. dx is
+     this substep's center-of-mass displacement:
+       dx > 0 → moving forward → fitness += dx        (rewarded 1:1)
+       dx < 0 → sliding back   → fitness += dx × 3    (punished 3:1)
+     HOW the horse moves is still irrelevant to THIS part — crawling,
+     hopping, flopping all earn; the gait ladder above decides which
+     STYLE of movement gets richly paid on top. */
+  h.fitness += dx > 0 ? dx : dx * 3;
+  h.dist = cx - h.start;                                     // current race distance (ft)
+  if (h.dist > h.maxDist + 0.04) { h.maxDist = h.dist; h.lastImprove = t; }  // progress bookkeeping
+  // holding a good gait also counts as "improving" — a horse standing
+  // proudly (or flying down the track) must not be written off as stagnant
+  if (h.gait === "gallop" || h.gait === "walk" || h.gait === "stand") h.lastImprove = t;
+  if (recDist.d < h.dist) recDist = { d: h.dist, name: h.name, gen };        // live record
+  if (!h.finished && h.dist >= TRACK) {                      // center of mass crossed the line!
+    h.finished = true; h.finishTime = t; h.done = true;
+    h.fitness += FINISH_BONUS + Math.max(0, GEN_TIME - t) * 1.2;   // finish + speed bonus
+    onHorseFinish(h, w);
+  }
+  // a horse that hasn't improved its best distance for STAG_T seconds
+  // (after a 4 s grace period) gives up — no point watching it flail
+  if (t > 4 && t - h.lastImprove > STAG_T) h.stagnant = true;
+
+  /* FLOOR-STUCK RULE — a horse lying on the floor is not racing.
+     While the mean spine height stays below FLOOR_H (belly or knees on
+     the ground — anything genuinely standing holds more than 0.60) a
+     timer accumulates; the instant the horse gets up it resets to
+     zero. FLOOR_T continuous seconds on the floor ends the run on the
+     spot: fitness freezes where it is, the roster shows 🛌 and the
+     body dims out. This targets the flopper that twitches forward a
+     hundredth of a foot now and then — far too little to look alive,
+     but just enough to keep dodging the stagnation check forever. */
+  if (spineY < FLOOR_H) h.floorT += DT; else h.floorT = 0;
+  if (h.floorT > FLOOR_T) { h.stuck = true; h.done = true; }
+}
+
+/* One substep for the whole world: horses, dust, confetti, and the
+   end-of-race check. */
+function stepWorld(w) {
+  w.t += DT;
+  for (const h of w.horses) stepHorse(h, w.t, w);
+  // dust: simple ballistic particles that bounce softly on the ground
+  for (let i = w.dust.length - 1; i >= 0; i--) {
+    const p = w.dust[i];
+    p.x += p.vx * DT; p.y += p.vy * DT; p.vy -= 1.2 * DT; p.vx *= 0.985;
+    if (p.y < 0.02) { p.y = 0.02; p.vy *= 0.5; }
+    p.life -= DT * 1.8; if (p.life <= 0) w.dust.splice(i, 1);
+  }
+  // confetti: heavier fall, spins, dies when its life runs out
+  for (let i = w.confetti.length - 1; i >= 0; i--) {
+    const p = w.confetti[i];
+    p.x += p.vx * DT; p.y += p.vy * DT; p.vy -= 9 * DT; p.vx *= 0.99; p.rot += 3 * DT;
+    if (p.y < 0.03) { p.y = 0.03; p.vy = 0; p.vx *= 0.9; }
+    p.life -= DT; if (p.life <= 0) w.confetti.splice(i, 1);
+  }
+  // race over when time is up OR nobody is still trying
+  if (!w.done) {
+    const active = w.horses.some(h => !h.dead && !h.finished && !h.stagnant && !h.stuck);
+    if (w.t > GEN_TIME || !active) w.done = true;
+  }
+}
+
+// build a fresh world: 12 horses from the given brains, all at the start line
+function createWorld(genomes, hues) {
+  const horses = genomes.map((g, i) => {
+    const h = buildHorse(g, hues[i], i + 1, randName());
+    return h;
+  });
+  return { horses, t: 0, done: false, dust: [], confetti: [] };
+}
+
+/* ---------- genetic algorithm ----------
+   How the next generation's 12 brains are chosen. */
+// tournament selection: grab 3 random horses, keep the fittest —
+// a nice middle ground between "always the best" (boring, converges
+// fast, fragile) and "pure roulette" (too random)
+function tournament(ranked) {
+  let best = null;
+  for (let i = 0; i < 3; i++) {
+    const c = ranked[(Math.random() * ranked.length) | 0];
+    if (!best || c.fitness > best.fitness) best = c;
+  }
+  return best;
+}
+// build the next generation's genome list:
+//   slot 0–1   exact copies of the two fittest brains (elitism —
+//              guarantees evolution never loses its best result)
+//   slot 2–3   brand-new random brains (fresh blood — keeps exploring)
+//   slot 4–11  children: two tournament parents → crossover → mutate
+function nextGenomes(horses) {
+  const ranked = [...horses].sort((a, b) => b.fitness - a.fitness);
+  const gs = [cloneG(ranked[0].genome), cloneG(ranked[1].genome)];   // elites
+  for (let i = 0; i < 2; i++) gs.push(randomGenome());               // fresh blood
+  while (gs.length < POP) {
+    const a = tournament(ranked), b = tournament(ranked);
+    gs.push(mutate(crossover(a.genome, b.genome)));
+  }
+  return gs;
+}
+
+/* ---------- canvas & camera ---------- */
+const cv = document.getElementById("game");
+const ctx = cv.getContext("2d");
+let W = 0, H = 0, dpr = 1, skyGrad = null;
+// handle window resizing + HiDPI (devicePixelRatio) so the canvas
+// stays crisp on retina screens
+function resize() {
+  dpr = Math.min(2, window.devicePixelRatio || 1);
+  W = window.innerWidth; H = window.innerHeight;
+  cv.width = W * dpr; cv.height = H * dpr;
+  cv.style.width = W + "px"; cv.style.height = H + "px";
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  // rebuild the sky gradient (depends on window height)
+  skyGrad = ctx.createLinearGradient(0, 0, 0, H * 0.85);
+  skyGrad.addColorStop(0, "#7cc4e8"); skyGrad.addColorStop(0.55, "#b3e0f2"); skyGrad.addColorStop(1, "#e6f5fb");
+}
+window.addEventListener("resize", resize); resize();
+
+// world→screen mapping: X also slides with the camera, Y flips because
+// world y is UP while screen y is DOWN. gy() = the ground line on screen.
+let cam = -3.5;
+const X = x => (x - cam) * FT + W * 0.34;
+const gy = () => H * 0.80;
+const Y = y => gy() - y * FT;
+
+// the camera gently chases the leading horse's center of mass
+function updateCamera(w) {
+  let lead = -1e9;
+  for (const h of w.horses) if (!h.dead && h.com.x > lead) lead = h.com.x;
+  if (lead < -1e8) lead = TRACK;
+  cam += (clamp(lead + 3.2, -3.5, TRACK + 9) - cam) * 0.07;
+}
+
+/* ---------- scene ----------
+   Everything painted behind the horses: sky, sun, clouds, parallax
+   hills, turf, grandstand, fence, distance markers, start & finish. */
+function hills(par, amp, base, col) {
+  ctx.fillStyle = col; ctx.beginPath(); ctx.moveTo(0, H);
+  for (let sx = 0; sx <= W + 24; sx += 24) {
+    const wx = (sx - W * 0.34) + cam * par * FT;   // scroll speed ∝ parallax factor
+    const yy = gy() - base * FT - amp * FT * (0.5 + 0.5 * Math.sin(wx * 0.011) + 0.3 * Math.sin(wx * 0.029 + 2));
+    ctx.lineTo(sx, yy);
+  }
+  ctx.lineTo(W, H); ctx.closePath(); ctx.fill();
+}
+// a fluffy cloud out of 4 overlapping circles
+function cloud(cx, cy, s, alpha) {
+  ctx.fillStyle = `rgba(255,255,255,${alpha})`;
+  ctx.beginPath();
+  ctx.arc(cx, cy, 22 * s, 0, TAU); ctx.arc(cx + 24 * s, cy - 10 * s, 18 * s, 0, TAU);
+  ctx.arc(cx + 48 * s, cy, 20 * s, 0, TAU); ctx.arc(cx + 24 * s, cy + 8 * s, 16 * s, 0, TAU);
+  ctx.fill();
+}
+// rounded-rectangle path on the MAIN canvas (used by tags, markers…)
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath(); ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+function drawScene(t) {
+  ctx.fillStyle = skyGrad; ctx.fillRect(0, 0, W, H);
+  // sun: soft radial glow + solid disc
+  const sunX = W * 0.80, sunY = H * 0.15;
+  const sg = ctx.createRadialGradient(sunX, sunY, 8, sunX, sunY, 90);
+  sg.addColorStop(0, "rgba(255,244,200,0.95)"); sg.addColorStop(1, "rgba(255,244,200,0)");
+  ctx.fillStyle = sg; ctx.fillRect(sunX - 90, sunY - 90, 180, 180);
+  ctx.fillStyle = "#fdf3c0"; ctx.beginPath(); ctx.arc(sunX, sunY, 26, 0, TAU); ctx.fill();
+  // clouds drift with a hint of parallax
+  for (let i = 0; i < 3; i++) {
+    const span = W + 600;
+    let cx = ((i * 560 + t * 9 - cam * 0.25 * FT) % span + span) % span - 300;
+    cloud(cx, H * (0.12 + i * 0.07), 0.8 + i * 0.25, 0.75 - i * 0.12);
+  }
+  hills(0.35, 1.1, 0.9, "#9fcfae");
+  hills(0.6, 0.8, 0.35, "#7dbd88");
+  // ground: green gradient turf with a bright top edge
+  const gyv = gy();
+  const gg = ctx.createLinearGradient(0, gyv, 0, H);
+  gg.addColorStop(0, "#6cbf5a"); gg.addColorStop(1, "#3f8a3c");
+  ctx.fillStyle = gg; ctx.fillRect(0, gyv, W, H - gyv);
+  ctx.fillStyle = "rgba(255,255,255,0.22)"; ctx.fillRect(0, gyv, W, 2);
+  // grandstand near the finish (a wooden block full of tiny fans)
+  const gx = X(25), gw = 4.5 * FT;
+  if (gx < W && gx + gw > 0) {
+    const top = gyv - 2.1 * FT;
+    ctx.fillStyle = "#a8763f"; ctx.fillRect(gx, top, gw, gyv - top);
+    for (let j = 0; j < 3; j++) {
+      const cy2 = top + 10 + j * 13;
+      for (let i = 0; i < 14; i++) {
+        ctx.fillStyle = `hsl(${(i * 37 + j * 91) % 360} 68% 62%)`;
+        ctx.beginPath(); ctx.arc(gx + 7 + i * (gw - 14) / 13, cy2, 3.4, 0, TAU); ctx.fill();
+      }
+    }
+    ctx.fillStyle = "#8b5e3c"; ctx.fillRect(gx - 6, top - 9, gw + 12, 9);
+    ctx.fillStyle = "#71492a";
+    ctx.fillRect(gx + 4, top, 4, gyv - top); ctx.fillRect(gx + gw - 8, top, 4, gyv - top);
+  }
+  // fence rails + posts, drawn across the visible camera span
+  const camL = cam - W * 0.34 / FT, camR = cam + W * 0.66 / FT;
+  ctx.strokeStyle = "rgba(139,94,60,0.85)"; ctx.lineWidth = 2.5;
+  for (const hy of [0.5, 0.85]) { ctx.beginPath(); ctx.moveTo(X(camL), Y(hy)); ctx.lineTo(X(camR), Y(hy)); ctx.stroke(); }
+  ctx.lineWidth = 3;
+  for (let px = Math.floor(camL / 3) * 3; px < camR; px += 3) {
+    ctx.beginPath(); ctx.moveTo(X(px), gyv); ctx.lineTo(X(px), Y(1.02)); ctx.stroke();
+  }
+  // distance ticks every 5 ft, yellow labels every 10 ft — on a 100 ft
+  // track a sign post every 5 ft would look like a picket fence
+  ctx.textAlign = "center"; ctx.textBaseline = "top";
+  for (let d = 0; d <= TRACK + 5; d += 5) {
+    const sxp = X(d); if (sxp < -40 || sxp > W + 40) continue;
+    ctx.fillStyle = "rgba(255,255,255,0.30)"; ctx.fillRect(sxp - 1, gyv + 2, 2, 7);
+    if (d > 0 && d < TRACK && d % 10 === 0) {
+      ctx.fillStyle = "#fbbf24"; roundRect(sxp - 19, Y(1.55), 38, 22, 5); ctx.fill();
+      ctx.fillStyle = "#1e293b"; ctx.font = "bold 11px ui-sans-serif,system-ui"; ctx.fillText(d + " ft", sxp, Y(1.55) + 5);
+      ctx.strokeStyle = "rgba(80,60,40,0.7)"; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(sxp, gyv); ctx.lineTo(sxp, Y(1.55) + 22); ctx.stroke();
+    }
+  }
+  // chalk start line
+  ctx.fillStyle = "rgba(255,255,255,0.75)"; ctx.fillRect(X(0) - 2, gyv - 1, 4, 9);
+  // finish: checkered strip, pole, waving flag, FINISH board
+  const fx = X(TRACK);
+  if (fx > -60 && fx < W + 60) {
+    for (let i = 0; i < 8; i++) { ctx.fillStyle = i % 2 ? "#111827" : "#f3f4f6"; ctx.fillRect(fx - 4 + i * 7, gyv, 7, 7); }
+    ctx.strokeStyle = "#cbd5e1"; ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.moveTo(fx, gyv); ctx.lineTo(fx, Y(2.8)); ctx.stroke();
+    const cell = 8;
+    for (let c2 = 0; c2 < 5; c2++) {
+      const wob = Math.sin(t * 4 + c2 * 0.9) * 2;   // per-column ripple = waving
+      for (let r2 = 0; r2 < 3; r2++) {
+        ctx.fillStyle = (c2 + r2) % 2 ? "#111827" : "#f8fafc";
+        ctx.fillRect(fx + 2 + c2 * cell, Y(2.8) + r2 * cell + wob, cell, cell);
+      }
+    }
+    ctx.fillStyle = "#fff"; roundRect(fx - 36, Y(3.6), 72, 20, 5); ctx.fill();
+    ctx.fillStyle = "#dc2626"; ctx.font = "bold 12px ui-sans-serif,system-ui"; ctx.textAlign = "center";
+    ctx.fillText("FINISH", fx, Y(3.6) + 4);
+  }
+  ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+}
+/* ---------- horse rendering ----------
+   Bodies are painted in 3 passes per horse: far-side legs (darker) →
+   barrel/tail/bib/neck/head → near-side legs. Layering sells depth. */
+function drawLeg(h, leg, far) {
+  const hp = leg.hip, k = leg.k, f = leg.f;
+  ctx.strokeStyle = far ? h.dark : h.mid;    // far-side legs in shadow color
+  ctx.lineCap = "round";
+  ctx.lineWidth = 0.115 * FT;                // thigh is thicker than shank…
+  ctx.beginPath(); ctx.moveTo(X(hp.x), Y(hp.y)); ctx.lineTo(X(k.x), Y(k.y)); ctx.stroke();
+  ctx.lineWidth = 0.075 * FT;                // …like this
+  ctx.beginPath(); ctx.moveTo(X(k.x), Y(k.y)); ctx.lineTo(X(f.x), Y(f.y)); ctx.stroke();
+  // hoof: small dark rect aligned with the shank's angle
+  const ang = Math.atan2(Y(f.y) - Y(k.y), X(f.x) - X(k.x));
+  ctx.save(); ctx.translate(X(f.x), Y(f.y)); ctx.rotate(ang);
+  ctx.fillStyle = far ? "#3f3325" : "#4a3b2a";
+  ctx.fillRect(-0.045 * FT, -0.05 * FT, 0.09 * FT, 0.10 * FT);
+  ctx.restore();
+}
+function drawHorse(h, isLeader, t) {
+  ctx.globalAlpha = (h.stagnant || h.dead || h.stuck) ? 0.35 : 0.96;   // dim horses that quit / died / got stuck
+  const far = [h.legs[1], h.legs[3]];
+  drawLeg(h, far[0], true); drawLeg(h, far[1], true);
+  // tail: one polyline through the 3 cosmetic nodes
+  ctx.strokeStyle = h.dark; ctx.lineWidth = 0.075 * FT; ctx.lineCap = "round"; ctx.lineJoin = "round";
+  ctx.beginPath();
+  ctx.moveTo(X(h.R.x), Y(h.R.y)); ctx.lineTo(X(h.T1.x), Y(h.T1.y));
+  ctx.lineTo(X(h.T2.x), Y(h.T2.y)); ctx.lineTo(X(h.T3.x), Y(h.T3.y)); ctx.stroke();
+  // barrel: a thick quadratic curve through rump→mid→shoulder
+  ctx.strokeStyle = h.color; ctx.lineWidth = 0.52 * FT;
+  ctx.beginPath(); ctx.moveTo(X(h.R.x), Y(h.R.y));
+  ctx.quadraticCurveTo(X(h.M.x), Y(h.M.y), X(h.S.x), Y(h.S.y)); ctx.stroke();
+  ctx.fillStyle = h.color;
+  ctx.beginPath(); ctx.arc(X(h.R.x), Y(h.R.y), 0.27 * FT, 0, TAU); ctx.fill();
+  ctx.beginPath(); ctx.arc(X(h.S.x), Y(h.S.y), 0.25 * FT, 0, TAU); ctx.fill();
+  // number bib pinned to the mid-spine
+  const bx = X(h.M.x), by = Y(h.M.y) + 0.04 * FT;
+  ctx.fillStyle = "rgba(255,255,255,0.92)";
+  ctx.beginPath(); ctx.arc(bx, by, 0.15 * FT, 0, TAU); ctx.fill();
+  ctx.fillStyle = "#0f172a"; ctx.font = `bold ${Math.round(0.19 * FT)}px ui-sans-serif,system-ui`;
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillText(String(h.number), bx, by + 1);
+  ctx.textBaseline = "alphabetic";
+  // neck + head (two tapered strokes)
+  ctx.strokeStyle = h.color; ctx.lineWidth = 0.20 * FT;
+  ctx.beginPath(); ctx.moveTo(X(h.S.x), Y(h.S.y)); ctx.lineTo(X(h.NB.x), Y(h.NB.y)); ctx.stroke();
+  ctx.lineWidth = 0.14 * FT;
+  ctx.beginPath(); ctx.moveTo(X(h.NB.x), Y(h.NB.y)); ctx.lineTo(X(h.H.x), Y(h.H.y)); ctx.stroke();
+  const hx = X(h.H.x), hy = Y(h.H.y);
+  const nbx = X(h.NB.x), nby = Y(h.NB.y);
+  const ang = Math.atan2(hy - nby, hx - nbx);   // head points along the neck
+  ctx.save(); ctx.translate(hx, hy); ctx.rotate(ang);
+  ctx.fillStyle = h.color;
+  ctx.beginPath(); ctx.ellipse(0.03 * FT, 0, 0.20 * FT, 0.125 * FT, 0, 0, TAU); ctx.fill();
+  // ear
+  ctx.fillStyle = h.dark;
+  ctx.beginPath(); ctx.moveTo(-0.10 * FT, -0.04 * FT); ctx.lineTo(-0.16 * FT, -0.15 * FT); ctx.lineTo(-0.02 * FT, -0.09 * FT); ctx.closePath(); ctx.fill();
+  // muzzle
+  ctx.fillStyle = h.mid;
+  ctx.beginPath(); ctx.arc(0.19 * FT, 0.015 * FT, 0.065 * FT, 0, TAU); ctx.fill();
+  // eye
+  ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(0.02 * FT, -0.045 * FT, 0.032 * FT, 0, TAU); ctx.fill();
+  ctx.fillStyle = "#111"; ctx.beginPath(); ctx.arc(0.03 * FT, -0.045 * FT, 0.016 * FT, 0, TAU); ctx.fill();
+  ctx.restore();
+  // mane: three little strokes along the top of the neck
+  ctx.strokeStyle = h.dark; ctx.lineWidth = 0.05 * FT;
+  for (let i = 0; i < 3; i++) {
+    const f2 = 0.25 + i * 0.25;
+    const mx = X(lerp(h.NB.x, h.H.x, f2)), my = Y(lerp(h.NB.y, h.H.y, f2)) - 0.06 * FT;
+    ctx.beginPath(); ctx.moveTo(mx, my); ctx.lineTo(mx - 0.05 * FT, my - 0.11 * FT); ctx.stroke();
+  }
+  // near-side legs painted last so they overlap the body
+  drawLeg(h, h.legs[0], false); drawLeg(h, h.legs[2], false);
+
+  /* ---------- NAME TAG ----------
+     EVERY horse wears a pill-shaped label floating above its head, so
+     you can tell who is who (and who is winning) without reading the
+     roster. h.tagLift was computed by layoutNametags() earlier this
+     frame: tags that would overlap are stacked upward instead of
+     smearing into each other. The current leader gets a golden tag. */
+  const tagTop = hy - 0.46 * FT - (h.tagLift || 0);
+  ctx.font = "bold 11px ui-sans-serif,system-ui";
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  const tagW = ctx.measureText(h.name).width + 14, tagH = 16;
+  ctx.fillStyle = isLeader ? "#f59e0b" : "rgba(15,23,42,0.78)";
+  ctx.strokeStyle = isLeader ? "#b45309" : "rgba(255,255,255,0.28)";
+  ctx.lineWidth = 1;
+  roundRect(hx - tagW / 2, tagTop, tagW, tagH, 8); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = isLeader ? "#1e293b" : "#ffffff";
+  ctx.fillText(h.name, hx, tagTop + tagH / 2 + 0.5);
+  ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+  // crown for the current leader, perched on top of its golden tag
+  if (isLeader) {
+    const cx2 = hx, cy2 = tagTop - 5;
+    ctx.fillStyle = "#fbbf24"; ctx.strokeStyle = "#b45309"; ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(cx2 - 13, cy2); ctx.lineTo(cx2 - 13, cy2 - 9); ctx.lineTo(cx2 - 6.5, cy2 - 3.5);
+    ctx.lineTo(cx2, cy2 - 12); ctx.lineTo(cx2 + 6.5, cy2 - 3.5); ctx.lineTo(cx2 + 13, cy2 - 9);
+    ctx.lineTo(cx2 + 13, cy2); ctx.closePath(); ctx.fill(); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+}
+/* ---------- name-tag layout ----------
+   At the start line all 12 horses bunch up, so name tags would smear
+   into an unreadable blob. Before drawing, every visible horse gets a
+   provisional tag rectangle (measured with the exact font the tag
+   uses). Rectangles are processed left→right; any tag that would
+   overlap an already-placed tag is "lifted" one row higher, and the
+   lift amount is stored on the horse for drawHorse() to apply. */
+function layoutNametags(vis) {
+  ctx.font = "bold 11px ui-sans-serif,system-ui";   // must match the tag font
+  const placed = [];
+  const items = vis.map(h => ({ h, hx: X(h.H.x), hy: Y(h.H.y) })).sort((a, b) => a.hx - b.hx);
+  for (const it of items) {
+    const w = ctx.measureText(it.h.name).width + 14, hgt = 16;   // same pill metrics as drawHorse
+    const x0 = it.hx - w / 2, x1 = it.hx + w / 2;
+    const yBase = it.hy - 0.46 * FT;                 // tag top with no lift
+    let lift = 0, clash = true, guard = 0;
+    while (clash) {                                  // keep lifting until this rect is clear
+      clash = false;
+      for (const r of placed) {
+        if (x1 > r.x0 && x0 < r.x1 && yBase - lift < r.y1 && yBase + hgt - lift > r.y0) {
+          /* lift by the ABSOLUTE amount that puts this tag's bottom just
+             above the blocking rect's top. (Re-deriving from r.lift would
+             recompute the same value forever when the two horses' tag
+             bases sit at different heights — a guaranteed freeze, so the
+             formula must strictly grow.) */
+          lift = Math.max(lift, (yBase + hgt) - r.y0 + 6);
+          clash = true;
+        }
+      }
+      if (++guard > 500) break;                      // never hang a frame on layout
+    }
+    placed.push({ x0, x1, y0: yBase - lift, y1: yBase - lift + hgt, lift });
+    it.h.tagLift = lift;
+  }
+}
+function drawParticles(w) {
+  for (const p of w.dust) {
+    ctx.fillStyle = `rgba(150,128,94,${0.5 * p.life})`;
+    ctx.beginPath(); ctx.arc(X(p.x), Y(p.y), p.s * FT, 0, TAU); ctx.fill();
+  }
+  for (const p of w.confetti) {
+    ctx.save(); ctx.translate(X(p.x), Y(p.y)); ctx.rotate(p.rot);
+    ctx.globalAlpha = clamp(p.life, 0, 1); ctx.fillStyle = p.col;
+    ctx.fillRect(-2.5, -4, 5, 8); ctx.restore();
+  }
+  ctx.globalAlpha = 1;
+}
+/* Paint the whole world: decide which horses are visible (camera
+   modes), resolve their name-tag overlaps, then draw them. */
+function drawWorld(w, t, leader) {
+  const vis = [];
+  for (const h of w.horses) {
+    if (leaderOnly && state === "race" && h !== leader) continue;   // 👁 Leader cam
+    if (state === "show" && h !== w.horses[0]) continue;            // showcase = champ only
+    vis.push(h);
+  }
+  layoutNametags(vis);                              // assign h.tagLift first …
+  for (const h of vis) drawHorse(h, h === leader, t);   // … then draw bodies + tags
+  drawParticles(w);
+}
+
+/* ---------- minimap ----------
+   A tiny 100 ft strip showing every horse's position as a colored dot
+   (crown over the leader) — handy when the camera zooms in on the
+   front of the race and the rest fall off-screen. */
+const mmCv = document.getElementById("minimap");
+const mmCtx = mmCv.getContext("2d");
+function drawMinimap(w, leader) {
+  const c = mmCtx, w2 = mmCv.width, h2 = mmCv.height;
+  c.clearRect(0, 0, w2, h2);
+  const x0 = 14, len = w2 - 40, y0 = 26;
+  c.fillStyle = "#1e293b"; roundRectM(c, x0 - 6, y0 - 8, len + 12, 14, 7); c.fill();
+  for (let d = 0; d <= TRACK; d += 10) {   // ticks every 10 ft on the 100 ft strip
+    const tx = x0 + d / TRACK * len;
+    c.fillStyle = "rgba(148,163,184,0.5)"; c.fillRect(tx, y0 - 8, 1, 14);
+    c.fillStyle = "#64748b"; c.font = "9px ui-sans-serif,system-ui"; c.textAlign = "center";
+    c.fillText(String(d), tx, y0 + 14);
+  }
+  c.font = "12px ui-sans-serif,system-ui"; c.textAlign = "left"; c.fillText("🏁", x0 + len + 2, y0 + 4);
+  for (const h of w.horses) {
+    const px = x0 + clamp(h.dist, 0, TRACK) / TRACK * len;
+    c.fillStyle = h.color; c.strokeStyle = "rgba(255,255,255,0.8)"; c.lineWidth = 1;
+    c.beginPath(); c.arc(px, y0 - 1, 4, 0, TAU); c.fill(); c.stroke();
+    if (h === leader) { c.font = "10px ui-sans-serif,system-ui"; c.fillText("👑", px - 5, y0 - 9); }
+  }
+}
+// rounded rect for the minimap's own context (roundRect above uses the main ctx)
+function roundRectM(c, x, y, w, h, r) {
+  c.beginPath(); c.moveTo(x + r, y);
+  c.arcTo(x + w, y, x + w, y + h, r); c.arcTo(x + w, y + h, x, y + h, r);
+  c.arcTo(x, y + h, x, y, r); c.arcTo(x, y, x + w, y, r); c.closePath();
+}
+
+/* ---------- fitness chart ----------
+   Best & average fitness per generation, plotted on its own little
+   canvas (bottom-right). This is the "learning curve" of the swarm:
+   a rising green line = evolution is working. */
+const chCv = document.getElementById("chart");
+const chCtx = chCv.getContext("2d");
+let history = [];   // one {gen, best, avg} record per completed generation
+function drawChart() {
+  const c = chCtx, w2 = chCv.width, h2 = chCv.height;
+  c.clearRect(0, 0, w2, h2);
+  c.fillStyle = "#94a3b8"; c.font = "bold 10px ui-sans-serif,system-ui"; c.textAlign = "left";
+  c.fillText("FITNESS PER GENERATION", 6, 12);
+  if (history.length < 1) { c.fillStyle = "#475569"; c.font = "10px ui-sans-serif,system-ui"; c.fillText("data appears after gen 1…", 6, 30); return; }
+  // find the value range (always include 0 so the zero line is visible)
+  let mn = 0, mx = 0.001;
+  for (const p of history) { mn = Math.min(mn, p.avg, p.best); mx = Math.max(mx, p.best, p.avg); }
+  const pad = (mx - mn) * 0.1 || 1; mx += pad; mn -= pad;
+  const px = i => 8 + (w2 - 16) * (history.length === 1 ? 1 : i / (history.length - 1));
+  const py = v => h2 - 18 - (h2 - 34) * (v - mn) / (mx - mn);
+  // dashed zero line — negative fitness (backward sliding) sits below it
+  if (mn < 0 && mx > 0) {
+    c.strokeStyle = "rgba(148,163,184,0.35)"; c.setLineDash([3, 3]);
+    c.beginPath(); c.moveTo(8, py(0)); c.lineTo(w2 - 8, py(0)); c.stroke(); c.setLineDash([]);
+  }
+  const line = (key, col, lw) => {
+    c.strokeStyle = col; c.lineWidth = lw; c.beginPath();
+    history.forEach((p, i) => i ? c.lineTo(px(i), py(p[key])) : c.moveTo(px(i), py(p[key])));
+    c.stroke();
+  };
+  line("avg", "#64748b", 1.5); line("best", "#22c55e", 2);
+  for (let i = 0; i < history.length; i++) {
+    c.fillStyle = "#22c55e"; c.beginPath(); c.arc(px(i), py(history[i].best), 2.4, 0, TAU); c.fill();
+  }
+  // numeric readout of the latest generation
+  const last = history[history.length - 1];
+  c.font = "10px ui-sans-serif,system-ui";
+  c.fillStyle = "#22c55e"; c.fillText("best " + last.best.toFixed(1), w2 - 78, 12);
+  c.fillStyle = "#94a3b8"; c.fillText("avg " + last.avg.toFixed(1), w2 - 78, 24);
+}
+/* ---------- game state ----------
+   state machine:
+     race    → the 12-horse generation is running
+     inter   → results overlay showing, next gen being bred
+     show    → champion showcase (all-time best, alone on the track)
+     showEnd → showcase finished, "Back to the race" button showing */
+let state = "race";
+let speed = 2, paused = false, leaderOnly = false;
+const hues = Array.from({ length: POP }, (_, i) => Math.round(i * 137.508) % 360);   // golden-angle hues → maximally distinct coats
+let genomes = Array.from({ length: POP }, randomGenome);
+let world = createWorld(genomes, hues);
+let bestEver = null, pending = null, interT = 0, showWorld = null;
+let leaderRef = null;
+
+// whoever is currently furthest down the track
+function computeLeader(w) {
+  let best = null;
+  for (const h of w.horses) if (!best || h.dist > best.dist) best = h;
+  return best;
+}
+
+/* ---------- generation flow ---------- */
+const overlay = document.getElementById("overlay");
+const ocard = document.getElementById("ocard");
+function showOverlay(html, sticky) { ocard.innerHTML = html; overlay.classList.add("show"); overlay.dataset.sticky = sticky ? "1" : ""; }
+function hideOverlay() { overlay.classList.remove("show"); }
+
+/* Called once when the race ends: score the generation, push the
+   numbers into the chart history, snapshot the all-time champion,
+   breed the next generation's brains, and show the results card. */
+function endGeneration() {
+  const ranked = [...world.horses].sort((a, b) => b.fitness - a.fitness);
+  const avg = world.horses.reduce((s, h) => s + h.fitness, 0) / world.horses.length;
+  history.push({ gen, best: ranked[0].fitness, avg });
+  let newRecord = false;
+  if (!bestEver || ranked[0].fitness > bestEver.fitness) {
+    if (bestEver) newRecord = true;
+    // deep-copy the brain — the horse object itself is about to be discarded
+    bestEver = { genome: cloneG(ranked[0].genome), name: ranked[0].name, gen, fitness: ranked[0].fitness, dist: ranked[0].maxDist, finished: ranked[0].finished, time: ranked[0].finishTime };
+  }
+  pending = nextGenomes(world.horses);
+  // RESULTS TOGGLE (P / 📋 button): with results turned off, skip the
+  // card AND the intermission pause — refresh the chart and jump
+  // straight into the next generation
+  if (!showResults) { drawChart(); startNextGen(); return; }
+  const w0 = ranked[0];
+  let html = `<div class="otitle">🏁 Generation ${gen} — Results</div>
+    <div class="owin">Winner: <b style="color:${w0.color}">${w0.name}</b> · ${w0.maxDist.toFixed(1)} ft${w0.finished ? ` · time ${w0.finishTime.toFixed(1)}s` : ""}</div>
+    <table><tr><th>#</th><th>Horse</th><th style="text-align:right">Distance</th><th style="text-align:right">Fitness</th></tr>`;
+  for (let i = 0; i < Math.min(5, ranked.length); i++) {
+    const h = ranked[i];
+    html += `<tr><td>${i + 1}</td><td style="color:${h.color};font-weight:600">${h.name}</td><td class="num">${h.maxDist.toFixed(1)} ft</td><td class="num">${h.fitness.toFixed(2)}</td></tr>`;
+  }
+  html += `</table>`;
+  if (newRecord) html += `<div class="orec">🏆 New all-time best fitness!</div>`;
+  html += `<div class="onext">breeding next generation…</div>`;
+  showOverlay(html, false);
+  state = "inter"; interT = 0;
+  drawChart();
+}
+// swap in the bred brains and rebuild every horse from scratch —
+// bodies are identical each generation; only the brains differ
+function startNextGen() {
+  gen++; genomes = pending;
+  world = createWorld(genomes, hues);
+  hideOverlay(); state = "race";
+}
+
+/* ---------- champion showcase ----------
+   Rerun the all-time best brain ALONE on a separate track, so you can
+   admire its gait without the mob. The main race world is preserved. */
+function openShowcase() {
+  if (!bestEver) return;
+  showWorld = createWorld([bestEver.genome], [45]);
+  showWorld.horses[0].name = bestEver.name + " (champ)";
+  state = "show";
+  showOverlay(`<div class="otitle">🏆 Champion Showcase</div>
+    <div class="owin"><b>${bestEver.name}</b> — Gen ${bestEver.gen} · best fitness ${bestEver.fitness.toFixed(1)} · ${bestEver.dist.toFixed(1)} ft</div>
+    <div class="onext">watching the all-time best brain run alone…</div>`, true);
+}
+function showEnd() {
+  const h = showWorld.horses[0];
+  showOverlay(`<div class="otitle">🏆 Showcase Over</div>
+    <div class="owin"><b>${bestEver.name}</b> ${h.finished ? `finished the 100 ft in ${h.finishTime.toFixed(1)}s!` : `covered ${h.dist.toFixed(1)} ft this time (physics is chaotic — rerun for another attempt)`}</div>
+    <button class="obtn" id="bBack">Back to the race</button>`, true);
+  state = "showEnd";
+}
+ocard.addEventListener("click", e => {
+  if (e.target && e.target.id === "bBack") { showWorld = null; hideOverlay(); state = "race"; }
+});
+
+/* ---------- HUD ----------
+   The roster is 12 reusable DOM rows; each update sorts horse indices
+   by distance and physically re-appends the rows so the leaderboard
+   reorders live. Throttled to ~8 refreshes/second for performance. */
+const geninfo = document.getElementById("geninfo");
+const recordsEl = document.getElementById("records");
+const rlist = document.getElementById("rlist");
+const rows = [];
+for (let i = 0; i < POP; i++) {
+  const row = document.createElement("div"); row.className = "rrow";
+  row.innerHTML = `<span class="rank"></span><span class="chip"></span><span class="nm"></span><div class="rbar"><div></div></div><span class="val"></span>`;
+  rlist.appendChild(row);
+  rows.push({ root: row, rank: row.children[0], chip: row.children[1], name: row.children[2], fill: row.children[3].children[0], val: row.children[4] });
+}
+let hudT = 1;
+function updateHUD(rdt, t) {
+  hudT += rdt; if (hudT < 0.12) return; hudT = 0;   // skip if we refreshed <0.12s ago
+  geninfo.textContent = state === "show" || state === "showEnd"
+    ? `🏆 Showcase · ${showWorld.t.toFixed(1)}s`
+    : `Gen ${gen} · ${world.t.toFixed(1)}s / ${GEN_TIME}s`;
+  const idx = [...world.horses.keys()].sort((a, b) => world.horses[b].dist - world.horses[a].dist);
+  for (let r = 0; r < idx.length; r++) {
+    const h = world.horses[idx[r]], row = rows[idx[r]];
+    rlist.appendChild(row.root);   // reorder DOM so leaderboard is visually ranked
+    row.rank.textContent = r + 1;
+    row.chip.style.background = h.color;
+    row.name.textContent = `#${h.number} ${h.name}`;
+    row.fill.style.width = `${clamp(h.dist / TRACK, 0, 1) * 100}%`;
+    row.fill.style.background = h.color;
+    // gait icons: 💨 galloping (sticky ~1.2 s so brief flight phases are
+    // visible) · 🚶 walking out (hooves down + stepping forward) ·
+    // 🐾 standing on all fours · ⭐ front legs bearing weight ·
+    // ❌ rear-only driving (being punished). Run-state icons:
+    // ☠ physics blew up · 🛌 stuck on the floor (run ended) · 💤 stagnant
+    const gallopFresh = h.gait === "gallop" || t - (h.lastGallop || -9) < 1.2;
+    const gaitIcon = gallopFresh ? "💨 " : h.gait === "walk" ? "🚶 " : h.gait === "stand" ? "🐾 "
+      : h.gait === "front" ? "⭐ " : h.gait === "rear" ? "❌ " : "";
+    row.val.textContent = h.dead ? "☠" : h.stuck ? "🛌" : h.stagnant ? "💤" : h.finished ? `🏁 ${h.finishTime.toFixed(1)}s` : `${gaitIcon}${h.dist.toFixed(1)} ft`;
+    row.root.style.opacity = (h.dead || h.stagnant || h.stuck) ? 0.45 : 1;
+  }
+  drawMinimap(world, leaderRef);
+  recordsEl.textContent = "📜 Farthest: " + (recDist.d > 0.01 ? `${recDist.d.toFixed(1)} ft — ${recDist.name} (Gen ${recDist.gen})` : "—")
+    + "   ·   ⏱ Fastest finish: " + (recTime.t < 1e9 ? `${recTime.t.toFixed(1)}s — ${recTime.name} (Gen ${recTime.gen})` : "—");
+}
+
+/* ---------- main loop ----------
+   requestAnimationFrame drives everything. Each animation frame we run
+   enough physics substeps to keep sim-time = speed × real-time:
+   at 60 fps and 1× that is 2 substeps of 1/120 s per frame. */
+let lastTs = 0;
+function frame(ts) {
+  // first successfully scheduled frame → the script clearly runs; drop
+  // the "booting…" pill so a stuck pill always means "script never ran"
+  if (window.__bootOK) window.__bootOK();
+  const rdt = Math.min(0.05, (ts - lastTs) / 1000 || 0.016); lastTs = ts;   // clamp tab-switch spikes
+  // 32× at 60 fps asks for 64 substeps per frame (a 45 fps display asks
+  // ~85); the cap only stops a slow (tab-switch) frame from demanding a
+  // huge catch-up spike
+  const steps = clamp(Math.round(2 * speed * rdt * 60), 1, 96);
+  if (state === "race" && !paused) {
+    for (let i = 0; i < steps && !world.done; i++) stepWorld(world);
+    if (world.done) endGeneration();
+    leaderRef = computeLeader(world);
+    updateCamera(world);
+  } else if (state === "inter") {
+    interT += rdt; if (interT > INTER_TIME) startNextGen();   // brief results pause → next gen
+    leaderRef = computeLeader(world);
+  } else if (state === "show" && !paused) {
+    for (let i = 0; i < steps && !showWorld.done; i++) stepWorld(showWorld);
+    if (showWorld.done) showEnd();
+    leaderRef = showWorld.horses[0];
+    updateCamera(showWorld);
+  }
+  const w = (state === "show" || state === "showEnd") ? showWorld : world;
+  drawScene(w.t);
+  drawWorld(w, w.t, leaderRef);
+  updateHUD(rdt, w.t);
+  requestAnimationFrame(frame);
+}
+
+/* ---------- controls ---------- */
+const bPause = document.getElementById("bPause");
+function setPaused(v) { paused = v; bPause.textContent = v ? "▶ Resume" : "⏸ Pause"; }
+bPause.onclick = () => setPaused(!paused);
+// results toggle: the end-of-generation results card can be turned off
+// entirely (press P or click 📋 Results) — generations then flow
+// straight into each other with no intermission. Turning it off while a
+// card is up skips that card too; the button label tracks the state.
+const bResults = document.getElementById("bResults");
+let showResults = true;
+function toggleResults() {
+  showResults = !showResults;
+  bResults.textContent = showResults ? "📋 Results" : "🚫 Results";
+  if (!showResults && state === "inter") startNextGen();   // skip the card currently showing
+}
+bResults.onclick = toggleResults;
+// speed control: six steps (1×/2×/4×/8×/16×/32×). Change it by CLICKING
+// a step, SCROLLING the mouse wheel over the control (up = faster,
+// down = slower, clamped at the ends), or pressing keys 1–6.
+const speedSeg = document.getElementById("speedSeg");
+const SPEEDS = [1, 2, 4, 8, 16, 32];
+function setSpeed(s) {
+  speed = s;
+  for (const x of speedSeg.children) x.classList.toggle("active", +x.dataset.s === s);
+}
+speedSeg.addEventListener("click", e => {
+  const b = e.target.closest("button"); if (!b) return;
+  setSpeed(+b.dataset.s);
+});
+// wheel-to-cycle: hover the speed buttons and scroll to run through the
+// whole speed ladder without aiming at any particular button
+speedSeg.addEventListener("wheel", e => {
+  e.preventDefault();                       // the page never scrolls anyway
+  const i = SPEEDS.indexOf(speed);
+  setSpeed(SPEEDS[clamp(i + (e.deltaY < 0 ? 1 : -1), 0, SPEEDS.length - 1)]);
+}, { passive: false });
+// camera: all horses vs leader-only chase cam
+const bView = document.getElementById("bView");
+function toggleView() { leaderOnly = !leaderOnly; bView.textContent = leaderOnly ? "👁 Leader" : "👁 All"; }
+bView.onclick = toggleView;
+document.getElementById("bShow").onclick = openShowcase;
+document.getElementById("bReset").onclick = () => {
+  if (!confirm("Restart evolution from Generation 1?")) return;
+  resetAll();
+};
+// keyboard: Space = pause · 1–6 = speed · V = camera · P = results on/off
+window.addEventListener("keydown", e => {
+  if (e.code === "Space") { e.preventDefault(); setPaused(!paused); }
+  else if (e.key >= "1" && e.key <= "6") setSpeed([1, 2, 4, 8, 16, 32][+e.key - 1]);
+  else if (e.key === "v" || e.key === "V") toggleView();
+  else if (e.key === "p" || e.key === "P") toggleResults();
+});
+
+/* ---------- boot ---------- */
+// wipe everything back to a fresh random generation 1
+function resetAll() {
+  gen = 1; history = []; bestEver = null; pending = null;
+  usedNames.clear();               // the name pool starts over too
+  recDist = { d: 0, name: "", gen: 0 }; recTime = { t: 1e9, name: "", gen: 0 };
+  genomes = Array.from({ length: POP }, randomGenome);
+  world = createWorld(genomes, hues);
+  cam = -3.5; state = "race"; showWorld = null; hideOverlay();
+  drawChart();
+}
+if (AUTOTEST) setSpeed(16);   // automated QA runs flat-out (also syncs the button highlight)
+drawChart();
+// debug / automated-test hook: window.SIM.snap() returns a summary of
+// the current simulation state from the console
+window.SIM = {
+  snap: () => ({
+    state, gen, worldT: +world.t.toFixed(1),
+    speed, results: showResults,   // current sim speed + results-card toggle
+    history: history.slice(-4).map(p => ({ gen: p.gen, best: +p.best.toFixed(2), avg: +p.avg.toFixed(2) })),
+    recDist: { d: +recDist.d.toFixed(2), name: recDist.name, gen: recDist.gen },
+    recTime: recTime.t < 1e9 ? { t: +recTime.t.toFixed(2), name: recTime.name, gen: recTime.gen } : null,
+    bestEver: bestEver ? { name: bestEver.name, fitness: +bestEver.fitness.toFixed(2), dist: +bestEver.dist.toFixed(2) } : null,
+    dists: world.horses.map(h => +h.dist.toFixed(2)),
+    fits: world.horses.map(h => +h.fitness.toFixed(1)),   // live fitness per horse
+    gaits: world.horses.map(h => h.gait || "-"),  // live gait-ladder state per horse
+    stuck: world.horses.map(h => h.stuck ? 1 : 0),  // floor-stuck (run ended) flags
+    spine: world.horses.map(h => +(((h.R.y + h.M.y + h.S.y) / 3).toFixed(2))) // mean spine height (ft)
+  })
+};
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
